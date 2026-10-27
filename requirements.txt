@@ -6,3 +6,4 @@ numpy
 soundfile
 scikit-learn
 audioread
+ffmpeg-python
