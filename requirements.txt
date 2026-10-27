@@ -1,9 +1,0 @@
-streamlit
-torch
-librosa
-matplotlib
-numpy
-soundfile
-scikit-learn
-audioread
-ffmpeg-python
