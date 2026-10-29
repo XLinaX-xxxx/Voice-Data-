@@ -10,7 +10,9 @@ from torch.utils.data import DataLoader, Dataset
 SAMPLE_RATE = 16000
 N_FILTERS = 32
 MAX_LEN = 200
-FEATURE_TYPE = "MFCC"  # เปลี่ยนเป็น "MFCC" หรือ "LFCC" ตามต้องการเพื่อเทรนโมเดลนั้นๆ
+FEATURE_TYPE = (  # เปลี่ยนเป็น "MFCC" หรือ "LFCC" ตามต้องการเพื่อเทรนโมเดลนั้นๆ
+    "MFCC"
+)
 
 
 def get_linear_filterbank(sr, n_fft, n_filters=32):
@@ -45,21 +47,18 @@ def extract_features(y, sr, feature_type="MFCC", max_len=200):
   hop_length = 512
 
   if feature_type == "MFCC":
-    # 1. Mel-Scale Filter Bank (MFCC)
     spec = librosa.feature.melspectrogram(
         y=y, sr=sr, n_mels=32, n_fft=n_fft, hop_length=hop_length
     )
     spec_db = librosa.power_to_db(spec, ref=np.max)
   else:
-    # 2. Linear-Scale Filter Bank (LFCC)
-    stft_matrix = np.abs(
-        librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
-    ) ** 2
+    stft_matrix = (
+        np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length)) ** 2
+    )
     linear_fb = get_linear_filterbank(sr, n_fft, n_filters=32)
     spec = np.dot(linear_fb, stft_matrix)
     spec_db = librosa.power_to_db(spec, ref=np.max)
 
-  # Pad หรือ Truncate ความยาวให้เท่ากับ MAX_LEN (200 เฟรม)
   current_len = spec_db.shape[1]
   if current_len < max_len:
     pad_width = max_len - current_len
@@ -70,13 +69,29 @@ def extract_features(y, sr, feature_type="MFCC", max_len=200):
   return spec_db
 
 
+def apply_augmentation(y):
+  """เพิ่ม Data Augmentation เพื่อให้โมเดลเรียนรู้ความหลากหลายของเสียง"""
+  # 1. สุ่มเติม White Noise เบาๆ (ช่วยให้โมเดลไม่ติดความเงียบกริ๊บ)
+  if np.random.rand() < 0.5:
+    noise = np.random.randn(len(y))
+    y = y + 0.005 * noise
+
+  # 2. สุ่มปรับความดัง (Volume Perturbation)
+  if np.random.rand() < 0.5:
+    factor = np.random.uniform(0.8, 1.2)
+    y = y * factor
+
+  return y
+
+
 class AudioDataset(Dataset):
 
-  def __init__(self, data_dir, feature_type="MFCC", max_len=200):
+  def __init__(self, data_dir, feature_type="MFCC", max_len=200, augment=True):
     self.file_list = []
     self.labels = []
     self.feature_type = feature_type
     self.max_len = max_len
+    self.augment = augment  # เปิดใช้งาน Data Augmentation เฉพาะตอนเทรน
 
     real_dir = os.path.join(data_dir, "real")
     if os.path.exists(real_dir):
@@ -105,6 +120,11 @@ class AudioDataset(Dataset):
       audio_path = self.file_list[idx]
       try:
         y, sr = librosa.load(audio_path, sr=SAMPLE_RATE, duration=4.0)
+
+        # ทำ Data Augmentation เฉพาะตอนฝึกซ้อม
+        if self.augment:
+          y = apply_augmentation(y)
+
         feat_db = extract_features(
             y, sr, feature_type=self.feature_type, max_len=self.max_len
         )
@@ -133,7 +153,9 @@ class AudioDeepfakeCNN(nn.Module):
         nn.ReLU(),
         nn.MaxPool2d(kernel_size=2, stride=2),
     )
+    # เพิ่ม Dropout เพื่อป้องกัน Overfitting (สุ่มปิด 30% ระหว่างเทรน)
     self.fc1 = nn.Linear(32 * 8 * 50, 64)
+    self.dropout = nn.Dropout(0.3)
     self.fc2 = nn.Linear(64, 2)
 
   def forward(self, x):
@@ -141,23 +163,28 @@ class AudioDeepfakeCNN(nn.Module):
     x = self.conv2(x)
     x = x.view(x.size(0), -1)
     x = torch.relu(self.fc1(x))
+    x = self.dropout(x)
     x = self.fc2(x)
     return x
 
 
 if __name__ == "__main__":
   print(f"--- เริ่มต้นกระบวนการเทรนด้วยฟีเจอร์: {FEATURE_TYPE} ---")
-  dataset = AudioDataset("dataset", feature_type=FEATURE_TYPE, max_len=MAX_LEN)
+  dataset = AudioDataset(
+      "dataset", feature_type=FEATURE_TYPE, max_len=MAX_LEN, augment=True
+  )
 
   if len(dataset) == 0:
     print("❌ ไม่พบไฟล์เสียงในโฟลเดอร์ dataset!")
   else:
     dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=0)
-    model = AudioDeepfakeCNN()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = AudioDeepfakeCNN().to(device)
+
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.0005)
 
-    epochs = 10
+    epochs = 15  # เพิ่มจำนวนรอบขึ้นอีกนิดเพื่อให้โมเดลเรียนรู้ได้ลึกขึ้น
     for epoch in range(epochs):
       model.train()
       running_loss = 0.0
@@ -165,6 +192,7 @@ if __name__ == "__main__":
       total = 0
 
       for inputs, labels in dataloader:
+        inputs, labels = inputs.to(device), labels.to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
         loss = criterion(outputs, labels)
@@ -186,4 +214,7 @@ if __name__ == "__main__":
         "best_model_lfcc.pth" if FEATURE_TYPE == "LFCC" else "best_model_mfcc.pth"
     )
     torch.save(model.state_dict(), model_filename)
-    print(f"--- เทรนเสร็จสิ้น และบันทึกโมเดลลงใน '{model_filename}' แล้ว! ---")
+    print(
+        f"--- เทรนเสร็จสิ้น และบันทึกโมเดลลงในเครื่องเรียบร้อยแล้ว ({model_filename})"
+        " ---"
+    )
