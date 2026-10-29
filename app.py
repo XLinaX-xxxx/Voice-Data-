@@ -7,16 +7,63 @@ import streamlit as st
 import torch
 import torch.nn as nn
 
-# กำหนดนามสกุลไฟล์เสียงที่รองรับทั้งหมด
 SUPPORTED_EXTENSIONS = (".wav", ".flac", ".mp3", ".m4a", ".ogg")
-
-# กำหนดค่ามาตรฐานในการสกัดฟีเจอร์ให้ตรงกับตอนเทรนโมเดล
 SAMPLE_RATE = 16000
-N_MELS = 32
+N_FILTERS = 32
 MAX_LEN = 200
 
 
-# โครงสร้างโมเดล 2D-CNN
+def get_linear_filterbank(sr, n_fft, n_filters=32):
+  min_freq = 0.0
+  max_freq = sr / 2.0
+  fft_freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+  filter_pts = np.linspace(min_freq, max_freq, n_filters + 2)
+
+  filterbank = np.zeros((n_filters, len(fft_freqs)))
+  for i in range(1, n_filters + 1):
+    f_prev = filter_pts[i - 1]
+    f_curr = filter_pts[i]
+    f_next = filter_pts[i + 1]
+    filterbank[i - 1] = np.where(
+        (fft_freqs >= f_prev) & (fft_freqs <= f_curr),
+        (fft_freqs - f_prev) / (f_curr - f_prev + 1e-8),
+        filterbank[i - 1],
+    )
+    filterbank[i - 1] = np.where(
+        (fft_freqs >= f_curr) & (fft_freqs <= f_next),
+        (f_next - fft_freqs) / (f_next - f_curr + 1e-8),
+        filterbank[i - 1],
+    )
+  return filterbank
+
+
+def extract_features(y, sr, feature_type="MFCC", max_len=200):
+  n_fft = 2048
+  hop_length = 512
+
+  if feature_type == "MFCC":
+    spec = librosa.feature.melspectrogram(
+        y=y, sr=sr, n_mels=32, n_fft=n_fft, hop_length=hop_length
+    )
+    spec_db = librosa.power_to_db(spec, ref=np.max)
+  else:
+    stft_matrix = np.abs(
+        librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
+    ) ** 2
+    linear_fb = get_linear_filterbank(sr, n_fft, n_filters=32)
+    spec = np.dot(linear_fb, stft_matrix)
+    spec_db = librosa.power_to_db(spec, ref=np.max)
+
+  current_len = spec_db.shape[1]
+  if current_len < max_len:
+    pad_width = max_len - current_len
+    spec_db = np.pad(spec_db, ((0, 0), (0, pad_width)), mode="constant")
+  else:
+    spec_db = spec_db[:, :max_len]
+
+  return spec_db
+
+
 class AudioDeepfakeCNN(nn.Module):
 
   def __init__(self):
@@ -46,10 +93,15 @@ class AudioDeepfakeCNN(nn.Module):
 
 
 @st.cache_resource
-def load_trained_model():
-  model_path = "best_model.pth"
+def load_trained_model(feature_type):
+  model_path = (
+      "best_model_lfcc.pth" if feature_type == "LFCC" else "best_model_mfcc.pth"
+  )
   if not os.path.exists(model_path):
-    return None, None
+    if os.path.exists("best_model.pth"):
+      model_path = "best_model.pth"
+    else:
+      return None, None
 
   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
   model = AudioDeepfakeCNN().to(device)
@@ -74,15 +126,24 @@ st.set_page_config(
 st.title("🎙️ Audio Deepfake Detection System")
 st.write(
     "ระบบตรวจสอบและวิเคราะห์เสียงพูดเพื่อจำแนกเสียงระหว่าง **มนุษย์จริง (Real)**"
-    " และ **เสียงสังเคราะห์จาก AI (Fake)**"
+    " และ **เสียงสังเคราะห์จาก AI (Fake)** ด้วยการเปรียบเทียบฟีเจอร์ MFCC และ"
+    " LFCC"
 )
 
-model, device = load_trained_model()
+# Sidebar เลือกประเภทฟีเจอร์
+st.sidebar.header("⚙️ ตั้งค่าระบบประมวลผลสัญญาณ")
+feature_choice = st.sidebar.selectbox(
+    "เลือกฟีเจอร์ทางสัญญาณ (Feature Type):",
+    ("LFCC (Linear-Scale)", "MFCC (Mel-Scale)"),
+)
+selected_feature = "LFCC" if "LFCC" in feature_choice else "MFCC"
+
+model, device = load_trained_model(selected_feature)
 
 if model is None:
-  st.error(
-      "⚠️ ไม่พบไฟล์น้ำหนักโมเดล `best_model.pth` หรือไฟล์เสียหาย"
-      " กรุณารันไฟล์ `train.py` เพื่อสร้างโมเดลก่อน"
+  st.warning(
+      f"⚠️ ไม่พบไฟล์โมเดลสำหรับ `{selected_feature}` กรุณารันไฟล์ `train.py`"
+      f" ที่ตั้งค่า FEATURE_TYPE = '{selected_feature}' ก่อนใช้งาน"
   )
 else:
   real_folder = "dataset/real"
@@ -113,7 +174,6 @@ else:
   )
 
   target_file = None
-
   if source_option == "ไฟล์ตัวอย่างในระบบ":
     choice = st.sidebar.radio(
         "เลือกประเภทเสียง:",
@@ -124,10 +184,7 @@ else:
     elif "Fake" in choice and fake_files:
       target_file = st.sidebar.selectbox("เลือกเสียง AI (Fake):", fake_files)
     else:
-      st.sidebar.warning(
-          "ไม่พบไฟล์เสียงในโฟลเดอร์ dataset (ตรวจสอบว่ามีโฟลเดอร์ dataset/real"
-          " และ dataset/fake หรือไม่)"
-      )
+      st.sidebar.warning("ไม่พบไฟล์เสียงในโฟลเดอร์ dataset")
   else:
     uploaded_file = st.sidebar.file_uploader(
         "อัปโหลดไฟล์เสียง (.wav, .flac, .mp3, .m4a, .ogg)",
@@ -142,27 +199,21 @@ else:
 
   if target_file and os.path.exists(target_file):
     st.markdown("---")
-    st.subheader(f"🎧 ไฟล์ที่กำลังตรวจสอบ: `{os.path.basename(target_file)}`")
+    st.subheader(
+        f"🎧 ไฟล์ที่กำลังตรวจสอบ: `{os.path.basename(target_file)}`"
+        f" [โหมด: {selected_feature}]"
+    )
     st.audio(target_file)
 
     try:
       y, sr = librosa.load(target_file, sr=SAMPLE_RATE, duration=4.0)
-      mel_spec = librosa.feature.melspectrogram(
-          y=y, sr=sr, n_mels=N_MELS, n_fft=2048, hop_length=512
-      )
-      mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
 
-      current_len = mel_spec_db.shape[1]
-      if current_len < MAX_LEN:
-        pad_width = MAX_LEN - current_len
-        mel_spec_db = np.pad(
-            mel_spec_db, ((0, 0), (0, pad_width)), mode="constant"
-        )
-      else:
-        mel_spec_db = mel_spec_db[:, :MAX_LEN]
+      feat_db = extract_features(
+          y, sr, feature_type=selected_feature, max_len=MAX_LEN
+      )
 
       input_tensor = (
-          torch.tensor(mel_spec_db, dtype=torch.float32)
+          torch.tensor(feat_db, dtype=torch.float32)
           .unsqueeze(0)
           .unsqueeze(0)
           .to(device)
@@ -187,38 +238,24 @@ else:
         )
 
       st.markdown("---")
-      st.subheader("📊 วิเคราะห์คลื่นความถี่และสเปกตรัมเสียง")
-      fig, ax = plt.subplots(nrows=3, ncols=1, figsize=(10, 9))
+      st.subheader(
+          f"📊 การวิเคราะห์สัญญาณและสเปกตรัม ({selected_feature} Spectrogram)"
+      )
+      fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(10, 7))
 
+      # 1. Waveform
       librosa.display.waveshow(y, sr=sr, ax=ax[0], color="royalblue")
       ax[0].set(title="Waveform (Time-Domain)")
       ax[0].set_xlabel("Time (s)")
       ax[0].set_ylabel("Amplitude")
 
-      img1 = librosa.display.specshow(
-          mel_spec_db,
-          sr=sr,
-          x_axis="time",
-          y_axis="mel",
-          ax=ax[1],
-          cmap="coolwarm",
+      # 2. Spectrogram (MFCC / LFCC)
+      cmap_type = "coolwarm" if selected_feature == "MFCC" else "magma"
+      img = librosa.display.specshow(
+          feat_db, sr=sr, hop_length=512, x_axis="time", ax=ax[1], cmap=cmap_type
       )
-      ax[1].set(title="Mel-Spectrogram")
-      fig.colorbar(img1, ax=ax[1], format="%+2.0f dB")
-
-      D = librosa.stft(y, n_fft=2048, hop_length=512)
-      S_db = librosa.amplitude_to_db(np.abs(D), ref=np.max)
-      img2 = librosa.display.specshow(
-          S_db,
-          sr=sr,
-          hop_length=512,
-          x_axis="time",
-          y_axis="linear",
-          ax=ax[2],
-          cmap="magma",
-      )
-      ax[2].set(title="Linear-Spectrogram")
-      fig.colorbar(img2, ax=ax[2], format="%+2.0f dB")
+      ax[1].set(title=f"{selected_feature} Spectrogram Representation")
+      fig.colorbar(img, ax=ax[1], format="%+2.0f dB")
 
       plt.tight_layout()
       st.pyplot(fig)
