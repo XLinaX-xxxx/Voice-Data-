@@ -239,14 +239,12 @@ else:
                     value=f"{confidence:.2f}%",
                 )
 
-            # เพิ่มส่วนแสดงรายละเอียดความน่าจะเป็นเพื่อความโปร่งใส
             st.write("📊 **คะแนนความน่าจะเป็นเชิงลึก (Class Probabilities):**")
             st.progress(int(real_prob))
             st.caption(f"👥 ความน่าจะเป็นว่าเป็นเสียงมนุษย์ (Real): **{real_prob:.2f}%**")
             st.progress(int(fake_prob))
             st.caption(f"🤖 ความน่าจะเป็นว่าเป็นเสียงปลอม (Fake): **{fake_prob:.2f}%**")
 
-            # เพิ่มกล่องอธิบายความโปร่งใส (Explainability) เพื่อแก้โจทย์ความน่าเชื่อถือ
             with st.expander("💡 ทำไมระบบถึงตัดสินใจแบบนี้? (Model Transparency)"):
                 st.write(
                     f"""
@@ -260,4 +258,24 @@ else:
             st.subheader(
                 f"📈 การวิเคราะห์สัญญาณและสเปกตรัม ({selected_feature} Spectrogram)"
             )
-            fig
+            fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(10, 7))
+
+            librosa.display.waveshow(y, sr=sr, ax=ax[0], color="royalblue")
+            ax[0].set(title="Waveform (Time-Domain)")
+            ax[0].set_xlabel("Time (s)")
+            ax[0].set_ylabel("Amplitude")
+
+            cmap_type = "coolwarm" if selected_feature == "MFCC" else "magma"
+            img = librosa.display.specshow(
+                feat_db, sr=sr, hop_length=512, x_axis="time", ax=ax[1], cmap=cmap_type
+            )
+            ax[1].set(title=f"{selected_feature} Spectrogram Representation")
+            fig.colorbar(img, ax=ax[1], format="%+2.0f dB")
+
+            plt.tight_layout()
+            st.pyplot(fig)
+
+        except Exception as e:
+            st.error(f"⚠️ เกิดข้อผิดพลาดในการประมวลผลไฟล์เสียง: {e}")
+    else:
+        st.warning("⚠️ กรุณาเลือกไฟล์ตัวอย่างหรืออัปโหลดไฟล์เสียงเพื่อเริ่มการวิเคราะห์")
